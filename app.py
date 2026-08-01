@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # ============================================================
 # بوت تصيد متقدم - نسخة Webhook (تعمل على Render)
+# تم التعديل للعمل مع python-telegram-bot == 13.14
 # ============================================================
 
 import os
@@ -11,7 +12,8 @@ import requests
 from datetime import datetime
 from flask import Flask, request, jsonify, redirect, make_response
 from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, ContextTypes, Dispatcher
+# تم إزالة Application لأننا نستخدم Dispatcher في الإصدار 13
+from telegram.ext import CommandHandler, ContextTypes, Dispatcher
 
 # ========== الإعدادات ==========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -230,7 +232,7 @@ def webhook():
         # إنشاء Update من البيانات
         update = Update.de_json(data, bot)
         
-        # معالجة التحديث باستخدام Dispatcher
+        # معالجة التحديث باستخدام Dispatcher (يعمل بشكل متزامن في الإصدار 13)
         dispatcher.process_update(update)
         
         return "OK", 200
